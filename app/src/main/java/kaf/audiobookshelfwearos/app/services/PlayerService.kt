@@ -410,7 +410,7 @@ class PlayerService : MediaSessionService() {
                 return chapter.title
             }
         }
-        return audiobook.title.ifEmpty { audiobook.media.metadata.title }
+        return audiobook.title.ifEmpty { audiobook.media.metadata.title ?: "" }
     }
 
     fun getCurrentBookId(): String {
