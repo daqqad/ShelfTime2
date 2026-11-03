@@ -98,6 +98,17 @@ class ChapterListActivity : ComponentActivity() {
     }
 
     private var isOnlineMode: Boolean = true
+    private var isNavigatingBack: Boolean = false
+
+    override fun finish() {
+        if (isTaskRoot && !isNavigatingBack) {
+            isNavigatingBack = true
+            startActivity(Intent(this, BookListActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            })
+        }
+        super.finish()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -434,11 +445,7 @@ class ChapterListActivity : ComponentActivity() {
 
         Button(
             onClick = {
-                saveAudiobookToDB(item)
-                // Start the PlayerService
-                PlayerService.setAudiobook(this, item, action = "continue")
-                val intent = Intent(this@ChapterListActivity, PlayerActivity::class.java)
-                startActivity(intent)
+                startPlaybackAndOpenPlayer(item, action = "continue")
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -461,6 +468,23 @@ class ChapterListActivity : ComponentActivity() {
         lifecycleScope.launch {
             val db = (applicationContext as MainApp).database
             db.libraryItemDao().insertLibraryItem(item)
+        }
+    }
+
+    private fun startPlaybackAndOpenPlayer(
+        item: LibraryItem,
+        time: Double = -1.0,
+        action: String = "default"
+    ) {
+        UserDataManager(this).lastPlayedItemId = item.id
+        lifecycleScope.launch {
+            val db = (applicationContext as MainApp).database
+            db.libraryItemDao().insertLibraryItem(item)
+            PlayerService.setAudiobook(this@ChapterListActivity, item, time = time, action = action)
+            val intent = Intent(this@ChapterListActivity, PlayerActivity::class.java).apply {
+                putExtra("id", item.id)
+            }
+            startActivity(intent)
         }
     }
 
@@ -539,10 +563,7 @@ class ChapterListActivity : ComponentActivity() {
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {
-                saveAudiobookToDB(audiobook)
-                PlayerService.setAudiobook(this, audiobook, track.start)
-                val intent = Intent(this@ChapterListActivity, PlayerActivity::class.java)
-                startActivity(intent)
+                startPlaybackAndOpenPlayer(audiobook, time = track.start)
             }
             .padding(16.dp)) {
             Text(

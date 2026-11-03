@@ -15,6 +15,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,7 +25,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.Composable
@@ -209,15 +212,53 @@ class BookListActivity : ComponentActivity() {
                         .padding(horizontal = 16.dp)
                 )
             } else {
-                // Search button
-                Button(
-                    onClick = onSearchToggle,
-                    modifier = Modifier.size(40.dp)
+                val lastPlayedId = UserDataManager(this@BookListActivity).lastPlayedItemId
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = "Search"
-                    )
+                    // Search button
+                    Button(
+                        onClick = onSearchToggle,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search"
+                        )
+                    }
+                    if (lastPlayedId.isNotEmpty()) {
+                        Button(
+                            onClick = {
+                                startActivity(
+                                    Intent(this@BookListActivity, PlayerActivity::class.java).apply {
+                                        putExtra("id", lastPlayedId)
+                                    }
+                                )
+                            },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Now Playing"
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            startActivity(
+                                Intent(this@BookListActivity, LoginActivity::class.java).apply {
+                                    putExtra("force_login", true)
+                                }
+                            )
+                        },
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Server Settings"
+                        )
+                    }
                 }
             }
         }

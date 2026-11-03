@@ -48,10 +48,13 @@
         <activity
             android:name=".app.activities.ChapterListActivity"
             android:exported="false"
-            android:launchMode="singleTop" />
+            android:launchMode="singleTop"
+            android:parentActivityName=".app.activities.BookListActivity" />
         <activity
             android:name=".app.activities.PlayerActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:parentActivityName=".app.activities.ChapterListActivity" />
 
         <receiver
             android:name="androidx.media3.session.MediaButtonReceiver"
@@ -75,7 +78,6 @@
         <activity
             android:name=".app.activities.LoginActivity"
             android:exported="true"
-            android:taskAffinity=""
             android:theme="@style/MainActivityTheme.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

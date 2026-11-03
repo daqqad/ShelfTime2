@@ -11,6 +11,7 @@ import android.os.IBinder
 import androidx.annotation.OptIn
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.TaskStackBuilder
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -29,6 +30,8 @@ import androidx.wear.ongoing.Status
 import kaf.audiobookshelfwearos.R
 import kaf.audiobookshelfwearos.app.ApiHandler
 import kaf.audiobookshelfwearos.app.MainApp
+import kaf.audiobookshelfwearos.app.activities.BookListActivity
+import kaf.audiobookshelfwearos.app.activities.ChapterListActivity
 import kaf.audiobookshelfwearos.app.activities.PlayerActivity
 import kaf.audiobookshelfwearos.app.data.Chapter
 import kaf.audiobookshelfwearos.app.data.LibraryItem
@@ -101,6 +104,7 @@ class PlayerService : MediaSessionService() {
         
         createPlayer()
         mediaSession = MediaSession.Builder(this, exoPlayer).build()
+        ensureAudiobookLoaded(autoPlay = false)
     }
 
     private fun createChannel(context: Context) {
@@ -141,15 +145,33 @@ class PlayerService : MediaSessionService() {
             .bigText("Playing")
             .setBigContentTitle(titleText)
 
-        // 3. Set up main Intent/Pending Intents for notification.
-        val launchActivityIntent = Intent(this, PlayerActivity::class.java)
+        // 3. Set up main Intent/Pending Intents for notification with full back stack.
+        val activeBookId = audiobook.id.ifEmpty { userDataManager.lastPlayedItemId }
+        val bookListIntent = Intent(this, BookListActivity::class.java)
+        val chapterListIntent = Intent(this, ChapterListActivity::class.java).apply {
+            putExtra("id", activeBookId)
+        }
+        val launchActivityIntent = Intent(this, PlayerActivity::class.java).apply {
+            putExtra("id", activeBookId)
+        }
 
-        val activityPendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            launchActivityIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        val activityPendingIntent = TaskStackBuilder.create(this)
+            .addNextIntent(bookListIntent)
+            .apply {
+                if (activeBookId.isNotEmpty()) {
+                    addNextIntent(chapterListIntent)
+                }
+            }
+            .addNextIntent(launchActivityIntent)
+            .getPendingIntent(
+                0,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            ) ?: PendingIntent.getActivity(
+                this,
+                0,
+                launchActivityIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
 
         // 4. Build and issue the notification.
         val notificationCompatBuilder =
@@ -265,7 +287,7 @@ class PlayerService : MediaSessionService() {
                     Timber.tag("PlayerService").d("ExoPlayer is paused")
                     stopPeriodicProgressSaving()
                     saveProgress() // Final save on pause
-                    sendBroadcast(Intent("$packageName.ACTION_PAUSE"))
+                    sendBroadcast(Intent("$packageName.ACTION_PAUSED"))
                     val currentTime = System.currentTimeMillis()
                     totalPlaybackTime += currentTime - playbackStartTime
                     Timber.tag("PlayerService")
@@ -381,33 +403,57 @@ class PlayerService : MediaSessionService() {
         }
     }
 
+    fun getCurrentChapterTitle(): String {
+        val timeInS = getCurrentTotalPositionInS() + START_OFFSET_SECONDS + 1
+        for (chapter in audiobook.media.chapters) {
+            if (timeInS >= chapter.start && timeInS < chapter.end) {
+                return chapter.title
+            }
+        }
+        return audiobook.title.ifEmpty { audiobook.media.metadata.title }
+    }
+
+    fun getCurrentBookId(): String {
+        return audiobook.id.ifEmpty { userDataManager.lastPlayedItemId }
+    }
+
+    fun isPlaying(): Boolean {
+        return ::exoPlayer.isInitialized && exoPlayer.isPlaying
+    }
+
+    fun isBuffering(): Boolean {
+        return ::exoPlayer.isInitialized && exoPlayer.playbackState == Player.STATE_BUFFERING
+    }
+
     fun updateUIMetadata() {
+        if (!::exoPlayer.isInitialized) return
+        if (audiobook.id.isEmpty()) {
+            ensureAudiobookLoaded(autoPlay = false)
+            return
+        }
         if (exoPlayer.playbackState == Player.STATE_BUFFERING) {
             val intent = Intent("$packageName.ACTION_BUFFERING")
             sendBroadcast(intent)
         }
 
-        val timeInS = getCurrentTotalPositionInS() + START_OFFSET_SECONDS + 1
-
-        var currentChapter = Chapter()
-        for (chapter in audiobook.media.chapters) {
-            if (timeInS >= chapter.start && timeInS < chapter.end)
-                currentChapter = chapter
-        }
-
+        val chapterTitle = getCurrentChapterTitle()
         val intent = Intent("$packageName.ACTION_UPDATE_METADATA").apply {
-            putExtra("CHAPTER_TITLE", currentChapter.title)
+            putExtra("CHAPTER_TITLE", chapterTitle)
         }
         sendBroadcast(intent)
-        if (exoPlayer.isPlaying)
+        if (exoPlayer.isPlaying) {
             sendBroadcast(Intent("$packageName.ACTION_PLAYING"))
+        } else if (exoPlayer.playbackState != Player.STATE_BUFFERING) {
+            sendBroadcast(Intent("$packageName.ACTION_PAUSED"))
+        }
     }
 
     private fun getCurrentTotalPositionInS(): Double {
-        if (audiobook.media.tracks.isEmpty())
+        if (!::exoPlayer.isInitialized || audiobook.media.tracks.isEmpty())
             return 0.0
-        val track = audiobook.media.tracks[exoPlayer.currentMediaItemIndex]
-        return track.startOffset + exoPlayer.currentPosition / 1000
+        val index = exoPlayer.currentMediaItemIndex.coerceIn(0, audiobook.media.tracks.lastIndex)
+        val track = audiobook.media.tracks[index]
+        return track.startOffset + exoPlayer.currentPosition.coerceAtLeast(0L) / 1000.0
     }
 
     // The user dismissed the app from the recent tasks
@@ -427,8 +473,61 @@ class PlayerService : MediaSessionService() {
         mediaSession
 
     @OptIn(UnstableApi::class)
-    private fun setAudiobook(audiobook: LibraryItem, userTotalTime: Double) {
+    private fun ensureAudiobookLoaded(
+        requestedId: String? = null,
+        autoPlay: Boolean = false,
+        onReady: () -> Unit = {}
+    ) {
+        scope.launch {
+            val alreadyLoaded = withContext(Dispatchers.Main) {
+                ::exoPlayer.isInitialized &&
+                    audiobook.id.isNotEmpty() &&
+                    exoPlayer.mediaItemCount > 0 &&
+                    (requestedId.isNullOrEmpty() || audiobook.id == requestedId)
+            }
+            if (alreadyLoaded) {
+                withContext(Dispatchers.Main) {
+                    onReady()
+                }
+                return@launch
+            }
+
+            val targetId = requestedId?.takeIf { it.isNotEmpty() } ?: userDataManager.lastPlayedItemId
+            var item = if (targetId.isNotEmpty()) {
+                db.libraryItemDao().getLibraryItemById(targetId)
+            } else {
+                null
+            }
+            if (item == null) {
+                item = db.libraryItemDao().getAllLibraryItems().firstOrNull()
+            }
+            if (item == null && targetId.isNotEmpty() && !userDataManager.offlineMode) {
+                item = ApiHandler(this@PlayerService).getItem(targetId)?.also {
+                    db.libraryItemDao().insertLibraryItem(it)
+                }
+            }
+
+            item?.let { loadedItem ->
+                withContext(Dispatchers.Main) {
+                    setAudiobook(loadedItem, loadedItem.userProgress.currentTime, autoPlay = autoPlay)
+                    onReady()
+                }
+            }
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun setAudiobook(
+        audiobook: LibraryItem,
+        userTotalTime: Double,
+        autoPlay: Boolean = true
+    ) {
+        if (audiobook.media.tracks.isEmpty()) {
+            Timber.w("Cannot setAudiobook: tracks list is empty for ${audiobook.id}")
+            return
+        }
         this.audiobook = audiobook
+        userDataManager.lastPlayedItemId = audiobook.id
         exoPlayer.clearMediaItems()
 
         //getting chapter by time
@@ -440,11 +539,12 @@ class PlayerService : MediaSessionService() {
                 break
             trackIndex++
         }
+        trackIndex = trackIndex.coerceIn(0, audiobook.media.tracks.lastIndex)
 
-        val userTrackTime = userTotalTime - audiobook.media.tracks[trackIndex].startOffset
+        val userTrackTime = (userTotalTime - audiobook.media.tracks[trackIndex].startOffset).coerceAtLeast(0.0)
 
         val headers = hashMapOf<String, String>()
-        headers["Authorization"] = "Bearer " + userDataManager.token;
+        headers["Authorization"] = "Bearer " + userDataManager.token
         // Create a factory for HTTP data sources with the OkHttpClient instance
         val dataSourceFactory: DataSource.Factory = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
@@ -488,14 +588,18 @@ class PlayerService : MediaSessionService() {
             concatenatingMediaSource.addMediaSource(mediaSource)
         }
 
+        val offsetSeconds = if (autoPlay) START_OFFSET_SECONDS else 0
+        val seekMs = ((userTrackTime.toLong() - offsetSeconds).coerceAtLeast(0L)) * 1000L
+
         exoPlayer.run {
             setMediaSources(sources)
             seekToDefaultPosition(trackIndex)
-            seekTo(trackIndex, (userTrackTime.toLong() - START_OFFSET_SECONDS) * 1000)
+            seekTo(trackIndex, seekMs)
             prepare()
             setSpeed(userDataManager.speed)
-            playWhenReady = true
+            playWhenReady = autoPlay
         }
+        updateUIMetadata()
     }
 
 
@@ -503,55 +607,101 @@ class PlayerService : MediaSessionService() {
         return totalPlaybackTime
     }
 
+    private fun seekRelativeMs(deltaMs: Long) {
+        if (!::exoPlayer.isInitialized || exoPlayer.mediaItemCount == 0) return
+        val newPos = exoPlayer.currentPosition + deltaMs
+        if (newPos < 0 && exoPlayer.currentMediaItemIndex > 0) {
+            val prevIndex = exoPlayer.currentMediaItemIndex - 1
+            val prevDurationMs = (audiobook.media.tracks.getOrNull(prevIndex)?.duration?.times(1000)?.toLong()) ?: 0L
+            exoPlayer.seekTo(prevIndex, (prevDurationMs + newPos).coerceAtLeast(0L))
+        } else {
+            exoPlayer.seekTo(newPos.coerceAtLeast(0L))
+        }
+        saveProgress()
+        updateUIMetadata()
+    }
+
     @OptIn(UnstableApi::class)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        val requestedId = intent?.getStringExtra("id")
+
         when (intent?.action) {
             "ACTION_PLAY_PAUSE" -> {
-                if (exoPlayer.isPlaying) {
+                if (audiobook.id.isEmpty() || exoPlayer.mediaItemCount == 0) {
+                    ensureAudiobookLoaded(requestedId, autoPlay = true)
+                } else if (exoPlayer.isPlaying) {
                     exoPlayer.pause()
                 } else {
+                    if (exoPlayer.playbackState == Player.STATE_IDLE) {
+                        exoPlayer.prepare()
+                    }
                     exoPlayer.play()
                 }
+                return START_STICKY
             }
 
             "ACTION_REWIND" -> {
-                exoPlayer.seekTo(exoPlayer.currentPosition - 10000) // Rewind 10 seconds
+                ensureAudiobookLoaded(requestedId, autoPlay = false) {
+                    seekRelativeMs(-10_000L)
+                }
+                return START_STICKY
             }
 
             "ACTION_FAST_FORWARD" -> {
-                exoPlayer.seekTo(exoPlayer.currentPosition + 10000) // Fast forward 10 seconds
+                ensureAudiobookLoaded(requestedId, autoPlay = false) {
+                    seekRelativeMs(10_000L)
+                }
+                return START_STICKY
             }
         }
 
-        intent?.getStringExtra("id")?.let { id ->
+        if (!requestedId.isNullOrEmpty()) {
             scope.launch {
-                db.libraryItemDao().getLibraryItemById(id)?.let {
+                val item = db.libraryItemDao().getLibraryItemById(requestedId)
+                    ?: if (!userDataManager.offlineMode) {
+                        ApiHandler(this@PlayerService).getItem(requestedId)?.also {
+                            db.libraryItemDao().insertLibraryItem(it)
+                        }
+                    } else null
+
+                item?.let {
                     withContext(Dispatchers.Main) {
                         var time = intent.getDoubleExtra("time", -1.0)
                         if (time < 0)
                             time = it.userProgress.currentTime
 
-                        if (intent.getStringExtra("action").equals("continue")) {
-                            if (audiobook.id.equals(id))
-                                return@withContext
+                        val action = intent.getStringExtra("action") ?: "default"
+                        if (action == "continue" && audiobook.id == requestedId && exoPlayer.mediaItemCount > 0) {
+                            if (exoPlayer.playbackState == Player.STATE_IDLE) {
+                                exoPlayer.prepare()
+                            }
+                            exoPlayer.play()
+                            updateUIMetadata()
+                            return@withContext
                         }
 
-                        setAudiobook(it, time)
+                        val autoPlay = action != "preload"
+                        setAudiobook(it, time, autoPlay = autoPlay)
                     }
                 }
             }
+        } else {
+            ensureAudiobookLoaded(autoPlay = false)
         }
 
         return START_STICKY
     }
 
     fun getCurrentPosition(): Long {
-        return exoPlayer.currentPosition
+        if (!::exoPlayer.isInitialized) return 0L
+        return exoPlayer.currentPosition.coerceAtLeast(0L)
     }
 
     fun getDuration(): Long {
-        return exoPlayer.duration
+        if (!::exoPlayer.isInitialized) return 0L
+        val dur = exoPlayer.duration
+        return if (dur > 0) dur else 0L
     }
 
 

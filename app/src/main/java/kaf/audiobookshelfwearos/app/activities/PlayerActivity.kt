@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Pause
@@ -55,6 +57,7 @@ import androidx.wear.compose.material.MaterialTheme
 import androidx.wear.compose.material.TimeText
 import androidx.wear.tooling.preview.devices.WearDevices
 import kaf.audiobookshelfwearos.app.services.PlayerService
+import kaf.audiobookshelfwearos.app.userdata.UserDataManager
 import kotlinx.coroutines.delay
 import timber.log.Timber
 import kotlin.math.roundToInt
@@ -63,6 +66,7 @@ import kotlin.math.roundToInt
 class PlayerActivity : ComponentActivity() {
     private var playerService: PlayerService? = null
     private var isBound = false
+    private var isNavigatingBack = false
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -77,13 +81,58 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    private fun resolveBookId(): String {
+        val intentId = intent?.getStringExtra("id")
+        if (!intentId.isNullOrEmpty()) return intentId
+        val serviceId = playerService?.getCurrentBookId()
+        if (!serviceId.isNullOrEmpty()) return serviceId
+        return UserDataManager(this).lastPlayedItemId
+    }
+
+    fun navigateBackToMenu() {
+        if (isNavigatingBack) return
+        isNavigatingBack = true
+        if (isTaskRoot) {
+            launchParentStack()
+        }
+        super.finish()
+    }
+
+    override fun finish() {
+        if (isTaskRoot && !isNavigatingBack) {
+            isNavigatingBack = true
+            launchParentStack()
+        }
+        super.finish()
+    }
+
+    private fun launchParentStack() {
+        val bookId = resolveBookId()
+        val bookListIntent = Intent(this, BookListActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        if (bookId.isNotEmpty()) {
+            val chapterIntent = Intent(this, ChapterListActivity::class.java).apply {
+                putExtra("id", bookId)
+            }
+            startActivities(arrayOf(bookListIntent, chapterIntent))
+        } else {
+            startActivity(bookListIntent)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Start the PlayerService
-        val intent = Intent(this, PlayerService::class.java)
-        startForegroundService(intent)
-        bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        // Start the PlayerService and pass current/last book ID so it can auto-load if needed
+        val bookId = resolveBookId()
+        val serviceIntent = Intent(this, PlayerService::class.java).apply {
+            if (bookId.isNotEmpty()) {
+                putExtra("id", bookId)
+            }
+        }
+        startForegroundService(serviceIntent)
+        bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
 
         setContent {
             PlaybackControls()
@@ -98,15 +147,29 @@ class PlayerActivity : ComponentActivity() {
         var duration by remember { mutableLongStateOf(0L) }
         var chapterTitle by remember { mutableStateOf("") }
 
+        if (!isPreview) {
+            BackHandler {
+                navigateBackToMenu()
+            }
+        }
+
         LaunchedEffect(Unit) {
             while (true) {
                 if (isBound) {
-                    currentPosition = playerService?.getCurrentPosition() ?: 0L
-                    playerService?.getDuration()?.let {
-                        if (it > 0) duration = it
+                    val svc = playerService
+                    if (svc != null) {
+                        currentPosition = svc.getCurrentPosition()
+                        val dur = svc.getDuration()
+                        if (dur > 0) duration = dur
+                        isPlaying = svc.isPlaying()
+                        isBuffering = svc.isBuffering()
+                        val title = svc.getCurrentChapterTitle()
+                        if (title.isNotEmpty()) {
+                            chapterTitle = title
+                        }
                     }
                 }
-                delay(1000)
+                delay(500)
             }
         }
 
@@ -151,8 +214,11 @@ class PlayerActivity : ComponentActivity() {
                             .padding(12.dp)
                             .weight(1f),
                         onClick = {
-                            val intent = Intent(this@PlayerActivity, PlayerService::class.java)
-                            intent.action = "ACTION_REWIND"
+                            val bookId = resolveBookId()
+                            val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
+                                action = "ACTION_REWIND"
+                                if (bookId.isNotEmpty()) putExtra("id", bookId)
+                            }
                             startForegroundService(intent)
                         }) {
                         Icon(
@@ -185,8 +251,11 @@ class PlayerActivity : ComponentActivity() {
                             strokeWidth = 3.dp
                         )
                         IconButton(modifier = Modifier.fillMaxSize(), onClick = {
-                            val intent = Intent(this@PlayerActivity, PlayerService::class.java)
-                            intent.action = "ACTION_PLAY_PAUSE"
+                            val bookId = resolveBookId()
+                            val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
+                                action = "ACTION_PLAY_PAUSE"
+                                if (bookId.isNotEmpty()) putExtra("id", bookId)
+                            }
                             startForegroundService(intent)
                             isPlaying = !isPlaying
                         }) {
@@ -204,8 +273,11 @@ class PlayerActivity : ComponentActivity() {
                     IconButton(modifier = Modifier
                         .fillMaxHeight()
                         .weight(1f), onClick = {
-                        val intent = Intent(this@PlayerActivity, PlayerService::class.java)
-                        intent.action = "ACTION_FAST_FORWARD"
+                        val bookId = resolveBookId()
+                        val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
+                            action = "ACTION_FAST_FORWARD"
+                            if (bookId.isNotEmpty()) putExtra("id", bookId)
+                        }
                         startForegroundService(intent)
                     }) {
                         Icon(
@@ -359,6 +431,20 @@ class PlayerActivity : ComponentActivity() {
                 IconButton(modifier = Modifier
                     .fillMaxHeight()
                     .weight(1f), onClick = {
+                    navigateBackToMenu()
+                }) {
+                    Icon(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(2.dp),
+                        tint = Color.Gray,
+                        imageVector = Icons.AutoMirrored.Filled.List,
+                        contentDescription = "Chapters & Library"
+                    )
+                }
+                IconButton(modifier = Modifier
+                    .fillMaxHeight()
+                    .weight(1f), onClick = {
                     showVolumeSlider = true
                 }) {
                     Icon(
@@ -411,8 +497,10 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        unbindService(connection)
-        isBound = false
+        if (isBound) {
+            unbindService(connection)
+            isBound = false
+        }
     }
 
     private fun timeToString(seconds: Long): String {

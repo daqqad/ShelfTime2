@@ -127,6 +127,9 @@ class ApiViewModel(private val apiHandler: ApiHandler) : ViewModel() {
                             item.userProgress = libraryItem.userProgress
                         }
                     }
+                    withContext(Dispatchers.IO) {
+                        db.libraryItemDao().insertLibraryItem(item)
+                    }
                     _isLoading.value = false
                     _item.postValue(item)
                 }

@@ -62,8 +62,14 @@ class LoginActivity : ComponentActivity() {
         userDataManager = UserDataManager(this)
         viewModel.setShowErrorTaosts(!userDataManager.offlineMode)
 
-        if (userDataManager.token.isNotEmpty()) {
-            viewModel.login()
+        val forceLogin = intent.getBooleanExtra("force_login", false)
+        if (userDataManager.token.isNotEmpty() && !forceLogin) {
+            if (isInternetAvailable()) {
+                viewModel.login()
+            }
+            startActivity(Intent(this, BookListActivity::class.java))
+            finish()
+            return
         }
 
         binding = ActivityLoginBinding.inflate(layoutInflater)
@@ -108,7 +114,7 @@ class LoginActivity : ComponentActivity() {
             Timber.d(user.token)
             userDataManager.token = user.token
             startActivity(Intent(this, BookListActivity::class.java))
-            startActivity(intent)
+            finish()
         }
 
         loginButton.setOnClickListener {
@@ -116,7 +122,7 @@ class LoginActivity : ComponentActivity() {
             Timber.d("isInternetAvailable() = " + isInternetAvailable())
             if (userDataManager.token.isNotEmpty() && !isInternetAvailable()) {
                 startActivity(Intent(this, BookListActivity::class.java))
-                startActivity(intent)
+                finish()
             } else viewModel.login()
         }
 

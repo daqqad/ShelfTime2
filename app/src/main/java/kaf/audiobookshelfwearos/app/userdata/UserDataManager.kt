@@ -17,6 +17,7 @@ class UserDataManager(context: Context) {
         private const val KEY_TOKEN = "token"
         private const val KEY_USERID = "userid"
         private const val KEY_OFFLINEMODE = "offlinemode"
+        private const val KEY_LAST_PLAYED_ITEM_ID = "last_played_item_id"
     }
 
     private val masterKey = MasterKey.Builder(context)
@@ -62,6 +63,10 @@ class UserDataManager(context: Context) {
     var offlineMode: Boolean
         get() = sharedPreferences.getBoolean(KEY_OFFLINEMODE, false)
         set(value) = sharedPreferences.edit().putBoolean(KEY_OFFLINEMODE, value).apply()
+
+    var lastPlayedItemId: String
+        get() = sharedPreferences.getString(KEY_LAST_PLAYED_ITEM_ID, null) ?: ""
+        set(value) = sharedPreferences.edit().putString(KEY_LAST_PLAYED_ITEM_ID, value).apply()
 
     fun clearUserData() {
         sharedPreferences.edit().clear().apply()
