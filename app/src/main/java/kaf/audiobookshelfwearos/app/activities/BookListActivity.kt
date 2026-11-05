@@ -96,9 +96,7 @@ class BookListActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Keep the screen on and show above off-wrist lockscreen while in foreground
-        setShowWhenLocked(true)
-        setTurnScreenOn(true)
+        // Keep the screen on while this activity is in the foreground
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         viewModel.loginResult.observe(

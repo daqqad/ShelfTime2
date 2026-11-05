@@ -77,6 +77,7 @@ class PlayerService : MediaSessionService() {
     private val PROGRESS_SAVE_INTERVAL = 30000L // 30 seconds
     private lateinit var networkConnectivityManager: NetworkConnectivityManager
     private var lastSavedPosition: Double = 0.0
+    private var isPreparingMedia: Boolean = false
 
     inner class LocalBinder : Binder() {
         fun getService(): PlayerService = this@PlayerService
@@ -299,6 +300,14 @@ class PlayerService : MediaSessionService() {
 
     // Enhanced saveProgress method with periodic flag
     private fun saveProgress(isPeriodicSave: Boolean = false) {
+        if (isPreparingMedia ||
+            !::exoPlayer.isInitialized ||
+            audiobook.id.isEmpty() ||
+            exoPlayer.mediaItemCount == 0 ||
+            exoPlayer.playbackState == Player.STATE_IDLE
+        ) {
+            return
+        }
         val currentPosition = getCurrentTotalPositionInS()
         Timber.d("Saving progress - periodic: $isPeriodicSave, position: $currentPosition")
         
@@ -627,18 +636,23 @@ class PlayerService : MediaSessionService() {
         }
 
         withContext(Dispatchers.Main) {
-            this@PlayerService.audiobook = audiobook
-            userDataManager.lastPlayedItemId = audiobook.id
-            exoPlayer.run {
-                clearMediaItems()
-                setMediaSources(sources)
-                seekTo(trackIndex, seekMs)
-                prepare()
-                setSpeed(userDataManager.speed)
-                playWhenReady = autoPlay
-                if (autoPlay) {
-                    play()
+            isPreparingMedia = true
+            try {
+                this@PlayerService.audiobook = audiobook
+                userDataManager.lastPlayedItemId = audiobook.id
+                exoPlayer.run {
+                    clearMediaItems()
+                    setMediaSources(sources)
+                    seekTo(trackIndex, seekMs)
+                    prepare()
+                    setSpeed(userDataManager.speed)
+                    playWhenReady = autoPlay
+                    if (autoPlay) {
+                        play()
+                    }
                 }
+            } finally {
+                isPreparingMedia = false
             }
             updateUIMetadata()
         }

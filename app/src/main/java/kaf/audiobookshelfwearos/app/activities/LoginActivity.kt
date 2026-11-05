@@ -62,9 +62,6 @@ class LoginActivity : ComponentActivity() {
         installSplashScreen()
 
         super.onCreate(savedInstanceState)
-        setShowWhenLocked(true)
-        setTurnScreenOn(true)
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setTheme(android.R.style.Theme_DeviceDefault)
 
         userDataManager = UserDataManager(this)

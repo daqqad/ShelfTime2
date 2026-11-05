@@ -114,9 +114,6 @@ class ChapterListActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setShowWhenLocked(true)
-        setTurnScreenOn(true)
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         isOnlineMode = !UserDataManager(this).offlineMode
         viewModel.setShowErrorTaosts(isOnlineMode)

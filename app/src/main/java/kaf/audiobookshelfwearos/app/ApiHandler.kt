@@ -175,8 +175,8 @@ class ApiHandler(private val context: Context) {
                 serverItem.let {
                     if (serverItem.userProgress.lastUpdate > userMediaProgress.lastUpdate) {
                         Timber.d("Progress on server is more recent. Not uploading")
-                        userMediaProgress.toUpload = false
-                        insertLibraryItemToDB(userMediaProgress)
+                        serverItem.userProgress.toUpload = false
+                        db.libraryItemDao().insertLibraryItem(serverItem)
                         return@withContext true
                     }
 
