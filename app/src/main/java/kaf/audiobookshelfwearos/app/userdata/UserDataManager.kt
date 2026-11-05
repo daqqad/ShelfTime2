@@ -22,20 +22,30 @@ class UserDataManager(context: Context) {
         @Volatile
         private var cachedPreferences: SharedPreferences? = null
 
+        private fun createEncryptedPrefs(appContext: Context): SharedPreferences {
+            val masterKey = MasterKey.Builder(appContext)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            return EncryptedSharedPreferences.create(
+                appContext,
+                PREF_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        }
+
         private fun getEncryptedPreferences(context: Context): SharedPreferences {
             return cachedPreferences ?: synchronized(this) {
                 cachedPreferences ?: run {
                     val appContext = context.applicationContext
-                    val masterKey = MasterKey.Builder(appContext)
-                        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                        .build()
-                    EncryptedSharedPreferences.create(
-                        appContext,
-                        PREF_NAME,
-                        masterKey,
-                        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-                    ).also { cachedPreferences = it }
+                    val prefs = try {
+                        createEncryptedPrefs(appContext)
+                    } catch (e: Exception) {
+                        appContext.deleteSharedPreferences(PREF_NAME)
+                        createEncryptedPrefs(appContext)
+                    }
+                    prefs.also { cachedPreferences = it }
                 }
             }
         }
@@ -44,7 +54,7 @@ class UserDataManager(context: Context) {
     private val sharedPreferences: SharedPreferences = getEncryptedPreferences(context)
 
     var serverAddress: String
-        get() = sharedPreferences.getString(KEY_SERVER_ADDRESS, null) ?: ""
+        get() = sharedPreferences.getString(KEY_SERVER_ADDRESS, null)?.takeIf { it.isNotEmpty() } ?: "bookshelf.daqfx.com"
         set(value) = sharedPreferences.edit().putString(KEY_SERVER_ADDRESS, value).apply()
 
     var login: String
@@ -68,7 +78,7 @@ class UserDataManager(context: Context) {
         set(value) = sharedPreferences.edit().putFloat(KEY_SPEED, value).apply()
 
     var protocol: String
-        get() = sharedPreferences.getString(KEY_PROTOCOL, null) ?: "https"
+        get() = sharedPreferences.getString(KEY_PROTOCOL, null)?.takeIf { it.isNotEmpty() } ?: "https"
         set(value) = sharedPreferences.edit().putString(KEY_PROTOCOL, value).apply()
 
     var offlineMode: Boolean

@@ -733,7 +733,7 @@ class PlayerService : MediaSessionService() {
                     }
                 }
             }
-        } else {
+        } else if (intent?.getBooleanExtra("ensure_loaded", false) == true) {
             ensureAudiobookLoaded(autoPlay = false)
         }
 

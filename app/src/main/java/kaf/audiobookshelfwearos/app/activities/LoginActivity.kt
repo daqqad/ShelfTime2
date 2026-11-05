@@ -15,11 +15,16 @@ import android.widget.EditText
 import androidx.activity.ComponentActivity
 import androidx.activity.viewModels
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.lifecycle.lifecycleScope
 import kaf.audiobookshelfwearos.R
 import kaf.audiobookshelfwearos.app.ApiHandler
+import kaf.audiobookshelfwearos.app.MainApp
 import kaf.audiobookshelfwearos.app.userdata.UserDataManager
 import kaf.audiobookshelfwearos.app.viewmodels.ApiViewModel
 import kaf.audiobookshelfwearos.databinding.ActivityLoginBinding
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import kotlin.reflect.KMutableProperty1
 
@@ -63,13 +68,30 @@ class LoginActivity : ComponentActivity() {
         viewModel.setShowErrorTaosts(!userDataManager.offlineMode)
 
         val forceLogin = intent.getBooleanExtra("force_login", false)
-        if (userDataManager.token.isNotEmpty() && !forceLogin) {
-            if (isInternetAvailable()) {
+        if ((userDataManager.token.isNotEmpty() || userDataManager.offlineMode) && !forceLogin) {
+            if (isInternetAvailable() && userDataManager.token.isNotEmpty()) {
                 viewModel.login()
             }
             startActivity(Intent(this, BookListActivity::class.java))
             finish()
             return
+        }
+        if (!forceLogin) {
+            lifecycleScope.launch {
+                val localItems = withContext(Dispatchers.IO) {
+                    (applicationContext as MainApp).database.libraryItemDao().getAllLibraryItems()
+                }
+                if (localItems.isNotEmpty()) {
+                    if (userDataManager.lastPlayedItemId.isEmpty()) {
+                        userDataManager.lastPlayedItemId = localItems.first().id
+                    }
+                    if (userDataManager.token.isEmpty()) {
+                        userDataManager.offlineMode = true
+                    }
+                    startActivity(Intent(this@LoginActivity, BookListActivity::class.java))
+                    finish()
+                }
+            }
         }
 
         binding = ActivityLoginBinding.inflate(layoutInflater)
@@ -120,7 +142,7 @@ class LoginActivity : ComponentActivity() {
         loginButton.setOnClickListener {
             Timber.d("Login clicked")
             Timber.d("isInternetAvailable() = " + isInternetAvailable())
-            if (userDataManager.token.isNotEmpty() && !isInternetAvailable()) {
+            if (userDataManager.offlineMode || (userDataManager.token.isNotEmpty() && !isInternetAvailable())) {
                 startActivity(Intent(this, BookListActivity::class.java))
                 finish()
             } else viewModel.login()
