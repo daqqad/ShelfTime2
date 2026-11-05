@@ -186,6 +186,12 @@ class ApiViewModel(private val apiHandler: ApiHandler) : ViewModel() {
                 if (includeLocalProgress) {
                     val db = (context.applicationContext as MainApp).database
                     localItems = db.libraryItemDao().getAllLibraryItems()
+                    if (localItems.isNotEmpty()) {
+                        val udm = UserDataManager(context)
+                        if (udm.lastPlayedItemId.isEmpty()) {
+                            udm.lastPlayedItemId = localItems.first().id
+                        }
+                    }
                     val items = if (onlyDownloaded) localItems.filter { it.isDownloaded(context) } else localItems
                     val localLibrary = Library(libraryItems = items)
                     allLibraries.add(localLibrary)
