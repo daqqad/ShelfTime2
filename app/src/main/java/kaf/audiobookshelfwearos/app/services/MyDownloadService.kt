@@ -327,12 +327,17 @@ class MyDownloadService : DownloadService(
             }
         }
 
-        private fun getDownloadDirectory(context: Context): File? {
-            var downloadDirectory = context.getExternalFilesDir(null)
-            if (downloadDirectory == null) {
-                downloadDirectory = context.filesDir
+        private fun getDownloadDirectory(context: Context): File {
+            val internalDownloads = File(context.filesDir, "downloads")
+            if (internalDownloads.exists()) {
+                return context.filesDir
             }
-            return downloadDirectory
+            val externalDir = context.getExternalFilesDir(null)
+            val externalDownloads = externalDir?.let { File(it, "downloads") }
+            if (externalDownloads != null && externalDownloads.exists() && externalDownloads.list() != null) {
+                return externalDir
+            }
+            return context.filesDir
         }
     }
 
