@@ -73,7 +73,11 @@ class PlayerActivity : ComponentActivity() {
             val binder = service as PlayerService.LocalBinder
             playerService = binder.getService()
             isBound = true
-            playerService!!.updateUIMetadata()
+            val startedPlayback = intent?.getBooleanExtra("started_playback", false) == true
+            if (!startedPlayback) {
+                playerService?.ensureLoadedIfNeeded(resolveBookId())
+            }
+            playerService?.updateUIMetadata()
         }
 
         override fun onServiceDisconnected(arg0: ComponentName) {
@@ -124,14 +128,12 @@ class PlayerActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Start the PlayerService and pass current/last book ID so it can auto-load if needed
-        val bookId = resolveBookId()
-        val serviceIntent = Intent(this, PlayerService::class.java).apply {
-            if (bookId.isNotEmpty()) {
-                putExtra("id", bookId)
-            }
+        val serviceIntent = Intent(this, PlayerService::class.java)
+        try {
+            startService(serviceIntent)
+        } catch (e: Exception) {
+            Timber.w(e, "startService failed in PlayerActivity.onCreate")
         }
-        startForegroundService(serviceIntent)
         bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
 
         setContent {
@@ -215,11 +217,16 @@ class PlayerActivity : ComponentActivity() {
                             .weight(1f),
                         onClick = {
                             val bookId = resolveBookId()
-                            val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
-                                action = "ACTION_REWIND"
-                                if (bookId.isNotEmpty()) putExtra("id", bookId)
+                            val svc = playerService
+                            if (isBound && svc != null) {
+                                svc.rewind(bookId)
+                            } else {
+                                val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
+                                    action = "ACTION_REWIND"
+                                    if (bookId.isNotEmpty()) putExtra("id", bookId)
+                                }
+                                startService(intent)
                             }
-                            startForegroundService(intent)
                         }) {
                         Icon(
                             tint = Color.White,
@@ -252,11 +259,16 @@ class PlayerActivity : ComponentActivity() {
                         )
                         IconButton(modifier = Modifier.fillMaxSize(), onClick = {
                             val bookId = resolveBookId()
-                            val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
-                                action = "ACTION_PLAY_PAUSE"
-                                if (bookId.isNotEmpty()) putExtra("id", bookId)
+                            val svc = playerService
+                            if (isBound && svc != null) {
+                                svc.togglePlayPause(bookId)
+                            } else {
+                                val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
+                                    action = "ACTION_PLAY_PAUSE"
+                                    if (bookId.isNotEmpty()) putExtra("id", bookId)
+                                }
+                                startService(intent)
                             }
-                            startForegroundService(intent)
                             isPlaying = !isPlaying
                         }) {
                             Icon(
@@ -274,11 +286,16 @@ class PlayerActivity : ComponentActivity() {
                         .fillMaxHeight()
                         .weight(1f), onClick = {
                         val bookId = resolveBookId()
-                        val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
-                            action = "ACTION_FAST_FORWARD"
-                            if (bookId.isNotEmpty()) putExtra("id", bookId)
+                        val svc = playerService
+                        if (isBound && svc != null) {
+                            svc.fastForward(bookId)
+                        } else {
+                            val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
+                                action = "ACTION_FAST_FORWARD"
+                                if (bookId.isNotEmpty()) putExtra("id", bookId)
+                            }
+                            startService(intent)
                         }
-                        startForegroundService(intent)
                     }) {
                         Icon(
                             modifier = Modifier

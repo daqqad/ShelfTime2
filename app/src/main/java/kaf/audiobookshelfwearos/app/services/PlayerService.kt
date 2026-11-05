@@ -42,19 +42,20 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.util.Timer
 import java.util.TimerTask
 import kotlin.math.abs
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 
 class PlayerService : MediaSessionService() {
 
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
+    private val loadMutex = Mutex()
 
     private val binder = LocalBinder()
     private lateinit var exoPlayer: ExoPlayer
@@ -104,7 +105,6 @@ class PlayerService : MediaSessionService() {
         
         createPlayer()
         mediaSession = MediaSession.Builder(this, exoPlayer).build()
-        ensureAudiobookLoaded(autoPlay = false)
     }
 
     private fun createChannel(context: Context) {
@@ -428,7 +428,6 @@ class PlayerService : MediaSessionService() {
     fun updateUIMetadata() {
         if (!::exoPlayer.isInitialized) return
         if (audiobook.id.isEmpty()) {
-            ensureAudiobookLoaded(autoPlay = false)
             return
         }
         if (exoPlayer.playbackState == Player.STATE_BUFFERING) {
@@ -479,45 +478,53 @@ class PlayerService : MediaSessionService() {
         onReady: () -> Unit = {}
     ) {
         scope.launch {
-            val alreadyLoaded = withContext(Dispatchers.Main) {
-                ::exoPlayer.isInitialized &&
-                    audiobook.id.isNotEmpty() &&
-                    exoPlayer.mediaItemCount > 0 &&
-                    (requestedId.isNullOrEmpty() || audiobook.id == requestedId)
-            }
-            if (alreadyLoaded) {
-                withContext(Dispatchers.Main) {
-                    onReady()
+            loadMutex.withLock {
+                val alreadyLoaded = withContext(Dispatchers.Main) {
+                    ::exoPlayer.isInitialized &&
+                        audiobook.id.isNotEmpty() &&
+                        exoPlayer.mediaItemCount > 0 &&
+                        (requestedId.isNullOrEmpty() || audiobook.id == requestedId)
                 }
-                return@launch
-            }
-
-            val targetId = requestedId?.takeIf { it.isNotEmpty() } ?: userDataManager.lastPlayedItemId
-            var item = if (targetId.isNotEmpty()) {
-                db.libraryItemDao().getLibraryItemById(targetId)
-            } else {
-                null
-            }
-            if (item == null) {
-                item = db.libraryItemDao().getAllLibraryItems().firstOrNull()
-            }
-            if (item == null && targetId.isNotEmpty() && !userDataManager.offlineMode) {
-                item = ApiHandler(this@PlayerService).getItem(targetId)?.also {
-                    db.libraryItemDao().insertLibraryItem(it)
+                if (alreadyLoaded) {
+                    withContext(Dispatchers.Main) {
+                        if (autoPlay && !exoPlayer.isPlaying) {
+                            if (exoPlayer.playbackState == Player.STATE_IDLE) {
+                                exoPlayer.prepare()
+                            }
+                            exoPlayer.play()
+                        }
+                        onReady()
+                    }
+                    return@withLock
                 }
-            }
 
-            item?.let { loadedItem ->
-                withContext(Dispatchers.Main) {
+                val targetId = requestedId?.takeIf { it.isNotEmpty() } ?: userDataManager.lastPlayedItemId
+                var item = if (targetId.isNotEmpty()) {
+                    db.libraryItemDao().getLibraryItemById(targetId)
+                } else {
+                    null
+                }
+                if (item == null) {
+                    item = db.libraryItemDao().getAllLibraryItems().firstOrNull()
+                }
+                if (item == null && targetId.isNotEmpty() && !userDataManager.offlineMode) {
+                    item = ApiHandler(this@PlayerService).getItem(targetId, suppressToast = true)?.also {
+                        db.libraryItemDao().insertLibraryItem(it)
+                    }
+                }
+
+                item?.let { loadedItem ->
                     setAudiobook(loadedItem, loadedItem.userProgress.currentTime, autoPlay = autoPlay)
-                    onReady()
+                    withContext(Dispatchers.Main) {
+                        onReady()
+                    }
                 }
             }
         }
     }
 
     @OptIn(UnstableApi::class)
-    private fun setAudiobook(
+    private suspend fun setAudiobook(
         audiobook: LibraryItem,
         userTotalTime: Double,
         autoPlay: Boolean = true
@@ -526,11 +533,8 @@ class PlayerService : MediaSessionService() {
             Timber.w("Cannot setAudiobook: tracks list is empty for ${audiobook.id}")
             return
         }
-        this.audiobook = audiobook
-        userDataManager.lastPlayedItemId = audiobook.id
-        exoPlayer.clearMediaItems()
 
-        //getting chapter by time
+        // Determine target track index and seek position
         var totalDuration = 0.0
         var trackIndex = 0
         for (track in audiobook.media.tracks) {
@@ -542,64 +546,102 @@ class PlayerService : MediaSessionService() {
         trackIndex = trackIndex.coerceIn(0, audiobook.media.tracks.lastIndex)
 
         val userTrackTime = (userTotalTime - audiobook.media.tracks[trackIndex].startOffset).coerceAtLeast(0.0)
-
-        val headers = hashMapOf<String, String>()
-        headers["Authorization"] = "Bearer " + userDataManager.token
-        // Create a factory for HTTP data sources with the OkHttpClient instance
-        val dataSourceFactory: DataSource.Factory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setDefaultRequestProperties(headers)
-
-        val sources = arrayListOf<MediaSource>()
-        for (track in audiobook.media.tracks) {
-            val url =
-                userDataManager.getCompleteAddress() + track.contentUrl
-
-            val mediaItem =
-                MediaItem.Builder()
-                    .setMediaId("track-index-" + track.index)
-                    .setUri(url)
-                    .setMediaMetadata(
-                        MediaMetadata.Builder()
-                            .setArtist(audiobook.media.metadata.authorName)
-                            .setTitle(audiobook.media.metadata.title)
-                            .build()
-                    )
-                    .build()
-
-            // Build a track source using the data source factory
-            val downloaded = track.isDownloaded(this)
-            Timber.d("${track.index} downloaded = $downloaded")
-
-            val downloadCache = MyDownloadService.getDownloadCache(this)
-
-            // Create a read-only cache data source factory using the download cache.
-            val cacheDataSourceFactory: DataSource.Factory =
-                CacheDataSource.Factory()
-                    .setCache(downloadCache)
-                    .setUpstreamDataSourceFactory(dataSourceFactory)
-                    .setCacheWriteDataSinkFactory(null) // Disable writing.
-
-            val mediaSource: MediaSource = ProgressiveMediaSource.Factory(cacheDataSourceFactory)
-                .createMediaSource(mediaItem)
-            sources.add(mediaSource)
-
-            val concatenatingMediaSource = ConcatenatingMediaSource()
-            concatenatingMediaSource.addMediaSource(mediaSource)
-        }
-
         val offsetSeconds = if (autoPlay) START_OFFSET_SECONDS else 0
         val seekMs = ((userTrackTime.toLong() - offsetSeconds).coerceAtLeast(0L)) * 1000L
 
-        exoPlayer.run {
-            setMediaSources(sources)
-            seekToDefaultPosition(trackIndex)
-            seekTo(trackIndex, seekMs)
-            prepare()
-            setSpeed(userDataManager.speed)
-            playWhenReady = autoPlay
+        // Fast path: if the same audiobook is already loaded in ExoPlayer, just seek and play/pause
+        val reusedExisting = withContext(Dispatchers.Main) {
+            if (::exoPlayer.isInitialized &&
+                this@PlayerService.audiobook.id == audiobook.id &&
+                exoPlayer.mediaItemCount == audiobook.media.tracks.size &&
+                exoPlayer.mediaItemCount > 0
+            ) {
+                this@PlayerService.audiobook = audiobook
+                userDataManager.lastPlayedItemId = audiobook.id
+                exoPlayer.seekTo(trackIndex, seekMs)
+                if (exoPlayer.playbackState == Player.STATE_IDLE) {
+                    exoPlayer.prepare()
+                }
+                setSpeed(userDataManager.speed)
+                exoPlayer.playWhenReady = autoPlay
+                if (autoPlay) {
+                    exoPlayer.play()
+                }
+                updateUIMetadata()
+                true
+            } else {
+                false
+            }
         }
-        updateUIMetadata()
+        if (reusedExisting) return
+
+        // Prepare MediaSources on Dispatchers.IO so disk cache & download DB queries never block Main
+        val sources = withContext(Dispatchers.IO) {
+            val headers = hashMapOf<String, String>()
+            headers["Authorization"] = "Bearer " + userDataManager.token
+            val dataSourceFactory: DataSource.Factory = DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setDefaultRequestProperties(headers)
+
+            val downloadCache = MyDownloadService.getDownloadCache(this@PlayerService)
+
+            val offlineCacheDataSourceFactory: DataSource.Factory =
+                CacheDataSource.Factory()
+                    .setCache(downloadCache)
+                    .setUpstreamDataSourceFactory(null)
+                    .setCacheWriteDataSinkFactory(null)
+                    .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+
+            val onlineCacheDataSourceFactory: DataSource.Factory =
+                CacheDataSource.Factory()
+                    .setCache(downloadCache)
+                    .setUpstreamDataSourceFactory(dataSourceFactory)
+                    .setCacheWriteDataSinkFactory(null)
+                    .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+
+            val builtSources = ArrayList<MediaSource>(audiobook.media.tracks.size)
+            val baseAddress = userDataManager.getCompleteAddress()
+            for (track in audiobook.media.tracks) {
+                val url = baseAddress + track.contentUrl
+                val mediaItem =
+                    MediaItem.Builder()
+                        .setMediaId("track-index-" + track.index)
+                        .setUri(url)
+                        .setMediaMetadata(
+                            MediaMetadata.Builder()
+                                .setArtist(audiobook.media.metadata.authorName)
+                                .setTitle(audiobook.media.metadata.title)
+                                .build()
+                        )
+                        .build()
+
+                val downloaded = track.isDownloaded(this@PlayerService)
+                Timber.d("${track.index} downloaded = $downloaded")
+
+                val factoryToUse = if (downloaded) offlineCacheDataSourceFactory else onlineCacheDataSourceFactory
+                val mediaSource: MediaSource = ProgressiveMediaSource.Factory(factoryToUse)
+                    .createMediaSource(mediaItem)
+                builtSources.add(mediaSource)
+            }
+            builtSources
+        }
+
+        withContext(Dispatchers.Main) {
+            this@PlayerService.audiobook = audiobook
+            userDataManager.lastPlayedItemId = audiobook.id
+            exoPlayer.run {
+                clearMediaItems()
+                setMediaSources(sources)
+                seekTo(trackIndex, seekMs)
+                prepare()
+                setSpeed(userDataManager.speed)
+                playWhenReady = autoPlay
+                if (autoPlay) {
+                    play()
+                }
+            }
+            updateUIMetadata()
+        }
     }
 
 
@@ -621,6 +663,35 @@ class PlayerService : MediaSessionService() {
         updateUIMetadata()
     }
 
+    fun ensureLoadedIfNeeded(requestedId: String?) {
+        ensureAudiobookLoaded(requestedId, autoPlay = false)
+    }
+
+    fun togglePlayPause(requestedId: String?) {
+        if (!::exoPlayer.isInitialized || audiobook.id.isEmpty() || exoPlayer.mediaItemCount == 0) {
+            ensureAudiobookLoaded(requestedId, autoPlay = true)
+        } else if (exoPlayer.isPlaying) {
+            exoPlayer.pause()
+        } else {
+            if (exoPlayer.playbackState == Player.STATE_IDLE) {
+                exoPlayer.prepare()
+            }
+            exoPlayer.play()
+        }
+    }
+
+    fun rewind(requestedId: String?) {
+        ensureAudiobookLoaded(requestedId, autoPlay = false) {
+            seekRelativeMs(-10_000L)
+        }
+    }
+
+    fun fastForward(requestedId: String?) {
+        ensureAudiobookLoaded(requestedId, autoPlay = false) {
+            seekRelativeMs(10_000L)
+        }
+    }
+
     @OptIn(UnstableApi::class)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
@@ -628,59 +699,35 @@ class PlayerService : MediaSessionService() {
 
         when (intent?.action) {
             "ACTION_PLAY_PAUSE" -> {
-                if (audiobook.id.isEmpty() || exoPlayer.mediaItemCount == 0) {
-                    ensureAudiobookLoaded(requestedId, autoPlay = true)
-                } else if (exoPlayer.isPlaying) {
-                    exoPlayer.pause()
-                } else {
-                    if (exoPlayer.playbackState == Player.STATE_IDLE) {
-                        exoPlayer.prepare()
-                    }
-                    exoPlayer.play()
-                }
+                togglePlayPause(requestedId)
                 return START_STICKY
             }
 
             "ACTION_REWIND" -> {
-                ensureAudiobookLoaded(requestedId, autoPlay = false) {
-                    seekRelativeMs(-10_000L)
-                }
+                rewind(requestedId)
                 return START_STICKY
             }
 
             "ACTION_FAST_FORWARD" -> {
-                ensureAudiobookLoaded(requestedId, autoPlay = false) {
-                    seekRelativeMs(10_000L)
-                }
+                fastForward(requestedId)
                 return START_STICKY
             }
         }
 
         if (!requestedId.isNullOrEmpty()) {
+            val requestedTime = intent.getDoubleExtra("time", -1.0)
+            val action = intent.getStringExtra("action") ?: "default"
             scope.launch {
-                val item = db.libraryItemDao().getLibraryItemById(requestedId)
-                    ?: if (!userDataManager.offlineMode) {
-                        ApiHandler(this@PlayerService).getItem(requestedId)?.also {
-                            db.libraryItemDao().insertLibraryItem(it)
-                        }
-                    } else null
-
-                item?.let {
-                    withContext(Dispatchers.Main) {
-                        var time = intent.getDoubleExtra("time", -1.0)
-                        if (time < 0)
-                            time = it.userProgress.currentTime
-
-                        val action = intent.getStringExtra("action") ?: "default"
-                        if (action == "continue" && audiobook.id == requestedId && exoPlayer.mediaItemCount > 0) {
-                            if (exoPlayer.playbackState == Player.STATE_IDLE) {
-                                exoPlayer.prepare()
+                loadMutex.withLock {
+                    val item = db.libraryItemDao().getLibraryItemById(requestedId)
+                        ?: if (!userDataManager.offlineMode) {
+                            ApiHandler(this@PlayerService).getItem(requestedId, suppressToast = true)?.also {
+                                db.libraryItemDao().insertLibraryItem(it)
                             }
-                            exoPlayer.play()
-                            updateUIMetadata()
-                            return@withContext
-                        }
+                        } else null
 
+                    item?.let {
+                        val time = if (requestedTime < 0) it.userProgress.currentTime else requestedTime
                         val autoPlay = action != "preload"
                         setAudiobook(it, time, autoPlay = autoPlay)
                     }
@@ -756,7 +803,11 @@ class PlayerService : MediaSessionService() {
                     action
                 )
             }
-            context.startForegroundService(serviceIntent)
+            try {
+                context.startService(serviceIntent)
+            } catch (e: Exception) {
+                context.startForegroundService(serviceIntent)
+            }
         }
     }
 

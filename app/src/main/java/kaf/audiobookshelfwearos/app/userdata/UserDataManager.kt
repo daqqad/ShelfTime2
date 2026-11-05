@@ -18,19 +18,30 @@ class UserDataManager(context: Context) {
         private const val KEY_USERID = "userid"
         private const val KEY_OFFLINEMODE = "offlinemode"
         private const val KEY_LAST_PLAYED_ITEM_ID = "last_played_item_id"
+
+        @Volatile
+        private var cachedPreferences: SharedPreferences? = null
+
+        private fun getEncryptedPreferences(context: Context): SharedPreferences {
+            return cachedPreferences ?: synchronized(this) {
+                cachedPreferences ?: run {
+                    val appContext = context.applicationContext
+                    val masterKey = MasterKey.Builder(appContext)
+                        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                        .build()
+                    EncryptedSharedPreferences.create(
+                        appContext,
+                        PREF_NAME,
+                        masterKey,
+                        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+                    ).also { cachedPreferences = it }
+                }
+            }
+        }
     }
 
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
-
-    private val sharedPreferences: SharedPreferences = EncryptedSharedPreferences.create(
-        context,
-        PREF_NAME,
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+    private val sharedPreferences: SharedPreferences = getEncryptedPreferences(context)
 
     var serverAddress: String
         get() = sharedPreferences.getString(KEY_SERVER_ADDRESS, null) ?: ""

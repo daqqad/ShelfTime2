@@ -8,7 +8,6 @@ import android.widget.Toast
 import com.fasterxml.jackson.core.json.JsonReadFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
-import com.google.firebase.crashlytics.FirebaseCrashlytics
 import kaf.audiobookshelfwearos.BuildConfig
 import kaf.audiobookshelfwearos.app.data.Library
 import kaf.audiobookshelfwearos.app.data.LibraryItem
@@ -38,17 +37,25 @@ data class SyncResult(
 )
 
 class ApiHandler(private val context: Context) {
-    private val timeout: Long = if (BuildConfig.DEBUG) 3 else 7
-    private var client = OkHttpClient.Builder().connectTimeout(timeout, TimeUnit.SECONDS)
-        .readTimeout(timeout, TimeUnit.SECONDS).writeTimeout(timeout, TimeUnit.SECONDS).build()
+    companion object {
+        private val timeout: Long = if (BuildConfig.DEBUG) 3 else 5
+        private val sharedClient: OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(timeout, TimeUnit.SECONDS)
+            .readTimeout(timeout, TimeUnit.SECONDS)
+            .writeTimeout(timeout, TimeUnit.SECONDS)
+            .build()
 
-    private var jacksonMapper =
-        ObjectMapper().enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature())
+        private val sharedJacksonMapper: ObjectMapper =
+            ObjectMapper().enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature())
+    }
+
+    private val client get() = sharedClient
+    private val jacksonMapper get() = sharedJacksonMapper
     private val userDataManager = UserDataManager(context)
     private val db = (context.applicationContext as MainApp).database
 
     // Retry configuration
-    private val maxRetries = 3
+    private val maxRetries = 1
     private val baseDelayMs = 1000L
 
     var shouldShowErrorToast = true
@@ -59,103 +66,98 @@ class ApiHandler(private val context: Context) {
 
     suspend fun getAllLibraries(): List<Library> {
         return withContext(Dispatchers.IO) {
-            val request = getRequest("/api/libraries")
-
             try {
+                val request = getRequest("/api/libraries")
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         showToast(response.code.toString())
                         return@use listOf()
                     }
                     val responseBody = response.body?.string()
-                    // Extract token from the JSON response
                     val jsonResponse = responseBody?.let { JSONObject(it) }
-                    val libraries = jsonResponse?.getJSONArray("libraries")
+                    val libraries = jsonResponse?.optJSONArray("libraries") ?: return@use listOf()
                     return@use jacksonMapper.readValue(libraries.toString())
                 }
-            } catch (e: SocketTimeoutException) {
-                e.printStackTrace()
-                return@withContext listOf()
             } catch (e: Exception) {
-                e.printStackTrace()
+                Timber.w(e, "getAllLibraries failed")
                 return@withContext listOf()
             }
-
         }
-
     }
 
     suspend fun getCover(id: String): Bitmap? {
         return withContext(Dispatchers.IO) {
-            val request = getRequest("/api/items/$id/cover?width=200")
             try {
+                val request = getRequest("/api/items/$id/cover?width=200")
                 client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) Timber.d("code: " + response.code)
-                    return@use BitmapFactory.decodeStream(response.body!!.byteStream())
+                    if (!response.isSuccessful) {
+                        Timber.d("code: " + response.code)
+                        return@use null
+                    }
+                    val body = response.body ?: return@use null
+                    return@use BitmapFactory.decodeStream(body.byteStream())
                 }
-            } catch (e: SocketTimeoutException) {
-                e.printStackTrace()
-                null
-            } catch (e: ConnectException) {
-                e.printStackTrace()
-                FirebaseCrashlytics.getInstance().log("Handled cover error")
-                FirebaseCrashlytics.getInstance().recordException(e)
-                showToast(e.message.toString())
-                null
             } catch (e: Exception) {
-                e.printStackTrace()
+                Timber.w(e, "Handled cover error for $id")
                 null
             }
         }
     }
 
-    suspend fun getItem(id: String): LibraryItem? {
+    suspend fun getItem(id: String, suppressToast: Boolean = false): LibraryItem? {
         return withContext(Dispatchers.IO) {
-            val request = getRequest("/api/items/$id?expanded=1&include=progress")
-            Timber.d("request = " + request)
             try {
+                val request = getRequest("/api/items/$id?expanded=1&include=progress")
+                Timber.d("request = " + request)
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
-                        showToast(response.code.toString())
+                        if (!suppressToast) showToast(response.code.toString())
                         return@use null
                     }
-                    val responseBody = response.body?.string()
-                    val libraryItem = jacksonMapper.readValue<LibraryItem>(responseBody.toString())
+                    val responseBody = response.body?.string() ?: return@use null
+                    val libraryItem = jacksonMapper.readValue<LibraryItem>(responseBody)
                     val localLibraryItem = db.libraryItemDao().getLibraryItemById(id)
                     localLibraryItem?.let {
-                        if (it.userProgress.lastUpdate > libraryItem.userProgress.lastUpdate) libraryItem.userProgress =
-                            localLibraryItem.userProgress
+                        if (it.userProgress.lastUpdate > libraryItem.userProgress.lastUpdate) {
+                            libraryItem.userProgress = localLibraryItem.userProgress
+                        }
                     }
 
                     return@use libraryItem
                 }
             } catch (e: SocketTimeoutException) {
+                Timber.w("Timeout fetching item $id")
                 return@withContext null
             } catch (e: Exception) {
-                e.printStackTrace()
-                FirebaseCrashlytics.getInstance().log("Handled item error")
-                FirebaseCrashlytics.getInstance().recordException(e)
-                showToast(e.message.toString())
+                Timber.w(e, "Handled item error for $id")
+                if (!suppressToast) {
+                    showToast(e.message ?: "Connection error")
+                }
                 null
             }
-
         }
     }
 
     suspend fun getLibraryItems(id: String): List<LibraryItem> {
         return withContext(Dispatchers.IO) {
-            val request = getRequest("/api/libraries/$id/items?sort=updatedAt")
-
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) showToast(response.code.toString())
-                val responseBody = response.body?.string()
-                // Extract token from the JSON response
-                val jsonResponse = responseBody?.let { JSONObject(it) }
-                val results = jsonResponse?.getJSONArray("results")
-                Timber.d(results?.length().toString())
-                val items: List<LibraryItem> =
-                    jacksonMapper.readValue<List<LibraryItem>>(results.toString()).reversed()
-                return@use items
+            try {
+                val request = getRequest("/api/libraries/$id/items?sort=updatedAt")
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        showToast(response.code.toString())
+                        return@use emptyList()
+                    }
+                    val responseBody = response.body?.string() ?: return@use emptyList()
+                    val jsonResponse = JSONObject(responseBody)
+                    val results = jsonResponse.optJSONArray("results") ?: return@use emptyList()
+                    Timber.d(results.length().toString())
+                    val items: List<LibraryItem> =
+                        jacksonMapper.readValue<List<LibraryItem>>(results.toString()).reversed()
+                    return@use items
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "getLibraryItems failed for library $id")
+                emptyList()
             }
         }
     }
@@ -167,9 +169,10 @@ class ApiHandler(private val context: Context) {
     suspend fun updateProgress(userMediaProgress: UserMediaProgress, retryCount: Int = 0): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                val serverItem = getItem(userMediaProgress.libraryItemId)
+                if (userDataManager.offlineMode) return@withContext false
+                val serverItem = getItem(userMediaProgress.libraryItemId, suppressToast = true) ?: return@withContext false
 
-                serverItem?.let {
+                serverItem.let {
                     if (serverItem.userProgress.lastUpdate > userMediaProgress.lastUpdate) {
                         Timber.d("Progress on server is more recent. Not uploading")
                         userMediaProgress.toUpload = false
@@ -179,24 +182,18 @@ class ApiHandler(private val context: Context) {
 
                     Timber.d("Uploading progress... (attempt ${retryCount + 1})")
                     val success = uploadProgress(userMediaProgress)
-                    
+
                     if (!success && retryCount < maxRetries) {
                         val delay = baseDelayMs * (1 shl retryCount) // Exponential backoff
                         Timber.d("Upload failed, retrying in ${delay}ms")
                         delay(delay)
                         return@withContext updateProgress(userMediaProgress, retryCount + 1)
                     }
-                    
+
                     return@withContext success
                 }
             } catch (e: Exception) {
-                Timber.e(e, "Failed to update progress (attempt ${retryCount + 1})")
-                
-                if (retryCount < maxRetries) {
-                    val delay = baseDelayMs * (1 shl retryCount)
-                    delay(delay)
-                    return@withContext updateProgress(userMediaProgress, retryCount + 1)
-                }
+                Timber.w(e, "Failed to update progress (attempt ${retryCount + 1})")
             }
 
             return@withContext false

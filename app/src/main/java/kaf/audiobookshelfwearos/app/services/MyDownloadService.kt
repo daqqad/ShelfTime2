@@ -32,7 +32,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import timber.log.Timber
 import java.io.File
-import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 
 
 const val DOWNLOAD_NOTIFICATION_CHANNEL_ID = "download_channel"
@@ -101,10 +101,12 @@ class MyDownloadService : DownloadService(
                 if (::downloadCache.isInitialized) {
                     return downloadCache
                 }
+                val appContext = context.applicationContext
+                val dbProvider = getDatabaseProvider(appContext)
                 val downloadContentDirectory =
-                    File(getDownloadDirectory(context.applicationContext), "downloads")
+                    File(getDownloadDirectory(appContext), "downloads")
                 downloadCache =
-                    SimpleCache(downloadContentDirectory, NoOpCacheEvictor(), databaseProvider)
+                    SimpleCache(downloadContentDirectory, NoOpCacheEvictor(), dbProvider)
                 return downloadCache
             }
         }
@@ -113,7 +115,6 @@ class MyDownloadService : DownloadService(
             val userDataManager = UserDataManager(context)
             val url = userDataManager.getCompleteAddress() + track.contentUrl
             Timber.d("Removing url = $url")
-            Timber.d("Downloaded = " + track.isDownloaded(context))
 
             val downloadIntent: Intent =
                 buildRemoveDownloadIntent(
@@ -123,15 +124,12 @@ class MyDownloadService : DownloadService(
                     false
                 )
             context.startService(downloadIntent)
-            Timber.d("Downloaded = " + track.isDownloaded(context))
-
         }
 
         fun sendAddDownload(context: Context, track: Track) {
             val userDataManager = UserDataManager(context)
             val url = userDataManager.getCompleteAddress() + track.contentUrl
             Timber.d("Downloading url = $url")
-            Timber.d("Downloaded = " + track.isDownloaded(context))
             val downloadRequest = DownloadRequest.Builder(
                 track.id,
                 Uri.parse(url)
@@ -153,19 +151,20 @@ class MyDownloadService : DownloadService(
                     return downloadManager
                 }
 
-                databaseProvider = getDatabaseProvider(context.applicationContext)
-                val downloadCache = getDownloadCache(context)
+                val appContext = context.applicationContext
+                databaseProvider = getDatabaseProvider(appContext)
+                val downloadCache = getDownloadCache(appContext)
 
                 val dataSourceFactory = DefaultHttpDataSource.Factory()
                 val headers = hashMapOf<String, String>()
-                val userDataManager = UserDataManager(context.applicationContext)
+                val userDataManager = UserDataManager(appContext)
                 headers["Authorization"] = "Bearer " + userDataManager.token
                 dataSourceFactory.setDefaultRequestProperties(headers)
 
-                val downloadExecutor = Executor(Runnable::run)
+                val downloadExecutor = Executors.newFixedThreadPool(2)
 
                 downloadManager = DownloadManager(
-                    context,
+                    appContext,
                     databaseProvider,
                     downloadCache,
                     dataSourceFactory,

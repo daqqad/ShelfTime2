@@ -14,6 +14,7 @@ import kaf.audiobookshelfwearos.app.MainApp
 import kaf.audiobookshelfwearos.app.data.Library
 import kaf.audiobookshelfwearos.app.data.LibraryItem
 import kaf.audiobookshelfwearos.app.data.User
+import kaf.audiobookshelfwearos.app.userdata.UserDataManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -109,44 +110,53 @@ class ApiViewModel(private val apiHandler: ApiHandler) : ViewModel() {
 
     fun getItem(context: Context, itemId: String) {
         _isLoading.value = true
-        viewModelScope.launch {
-            val db = (context.applicationContext as MainApp).database
-            val libraryItem = db.libraryItemDao().getLibraryItemById(itemId)
-            libraryItem?.let {
-                _isLoading.value = false
-                _item.postValue(libraryItem)
-            }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val db = (context.applicationContext as MainApp).database
+                val libraryItem = db.libraryItemDao().getLibraryItemById(itemId)
+                libraryItem?.let {
+                    _isLoading.value = false
+                    _item.postValue(it)
+                }
 
-            val item = apiHandler.getItem(itemId)
-            item?.let {
-                if (libraryItem == null || libraryItem.userProgress.lastUpdate <= item.userProgress.lastUpdate) {
-                    Timber.d("Post server version")
-                    libraryItem?.let {
-                        if (libraryItem.userProgress.lastUpdate >= item.userProgress.lastUpdate) {
+                if (UserDataManager(context).offlineMode) {
+                    return@launch
+                }
+
+                val item = apiHandler.getItem(itemId, suppressToast = (libraryItem != null))
+                item?.let {
+                    if (libraryItem == null || libraryItem.userProgress.lastUpdate <= item.userProgress.lastUpdate) {
+                        Timber.d("Post server version")
+                        if (libraryItem != null && libraryItem.userProgress.lastUpdate >= item.userProgress.lastUpdate) {
                             Timber.d("Local progress is newer or the same")
                             item.userProgress = libraryItem.userProgress
                         }
-                    }
-                    withContext(Dispatchers.IO) {
                         db.libraryItemDao().insertLibraryItem(item)
+                        _isLoading.value = false
+                        _item.postValue(item)
                     }
-                    _isLoading.value = false
-                    _item.postValue(item)
                 }
+            } catch (e: Exception) {
+                Timber.e(e, "Error loading item $itemId")
+            } finally {
+                _isLoading.value = false
             }
         }
     }
 
     fun sync(item: LibraryItem) {
         _isSyncing.value = true
-        viewModelScope.launch {
-            val newItem =
-                item.copy(userMediaProgress = item.userProgress.copy(toUpload = !item.userProgress.toUpload))
-            val updated = apiHandler.updateProgress(newItem.userProgress)
-            if (updated) {
-                _item.postValue(newItem)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val newItem =
+                    item.copy(userMediaProgress = item.userProgress.copy(toUpload = !item.userProgress.toUpload))
+                val updated = apiHandler.updateProgress(newItem.userProgress)
+                if (updated) {
+                    _item.postValue(newItem)
+                }
+            } finally {
+                _isSyncing.value = false
             }
-            _isSyncing.value = false
         }
     }
 
@@ -169,38 +179,53 @@ class ApiViewModel(private val apiHandler: ApiHandler) : ViewModel() {
         }
 
         _isLoading.value = true
-        viewModelScope.launch {
-            var localItems = listOf<LibraryItem>()
-            val allLibraries = mutableListOf<Library>()
-            if (includeLocalProgress) {
-                val db = (context.applicationContext as MainApp).database
-                localItems = db.libraryItemDao().getAllLibraryItems()
-                val items = if (onlyDownloaded) localItems.filter { it.isDownloaded(context) } else localItems
-                val localLibrary = Library(libraryItems = items)
-                allLibraries.add(localLibrary)
-                _libraries.postValue(listOf(localLibrary))
-                if (_searchQuery.value.isBlank()) {
-                    _filteredLibraries.value = listOf(localLibrary)
-                } else {
-                    filterLibraries(_searchQuery.value)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                var localItems = listOf<LibraryItem>()
+                val allLibraries = mutableListOf<Library>()
+                if (includeLocalProgress) {
+                    val db = (context.applicationContext as MainApp).database
+                    localItems = db.libraryItemDao().getAllLibraryItems()
+                    val items = if (onlyDownloaded) localItems.filter { it.isDownloaded(context) } else localItems
+                    val localLibrary = Library(libraryItems = items)
+                    allLibraries.add(localLibrary)
+                    val initialList = listOf(localLibrary)
+                    withContext(Dispatchers.Main) {
+                        _libraries.value = initialList
+                        if (_searchQuery.value.isBlank()) {
+                            _filteredLibraries.value = initialList
+                        } else {
+                            filterLibraries(_searchQuery.value)
+                        }
+                        _isLoading.value = false
+                    }
                 }
-                _isLoading.value = false
-            }
 
-            val res = loadLibraries(onlyDownloaded, context)
-            for (library in res) {
-                val deduped = library.libraryItems.filter { item2 ->
-                    localItems.none { item1 -> item1.id == item2.id }
+                if (onlyDownloaded) {
+                    lastLibraryFetchTime = System.currentTimeMillis()
+                    return@launch
                 }
-                allLibraries.add(library.copy(libraryItems = deduped))
-            }
-            lastLibraryFetchTime = System.currentTimeMillis()
-            _isLoading.value = false
-            _libraries.postValue(allLibraries)
-            if (_searchQuery.value.isBlank()) {
-                _filteredLibraries.value = allLibraries
-            } else {
-                filterLibraries(_searchQuery.value)
+
+                val res = loadLibraries(onlyDownloaded, context)
+                for (library in res) {
+                    val deduped = library.libraryItems.filter { item2 ->
+                        localItems.none { item1 -> item1.id == item2.id }
+                    }
+                    allLibraries.add(library.copy(libraryItems = deduped))
+                }
+                lastLibraryFetchTime = System.currentTimeMillis()
+                withContext(Dispatchers.Main) {
+                    _libraries.value = allLibraries
+                    if (_searchQuery.value.isBlank()) {
+                        _filteredLibraries.value = allLibraries
+                    } else {
+                        filterLibraries(_searchQuery.value)
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Error loading libraries")
+            } finally {
+                _isLoading.value = false
             }
         }
     }
