@@ -59,6 +59,8 @@ import androidx.wear.compose.material.TimeText
 import androidx.wear.tooling.preview.devices.WearDevices
 import kaf.audiobookshelfwearos.app.services.PlayerService
 import kaf.audiobookshelfwearos.app.userdata.UserDataManager
+import kaf.audiobookshelfwearos.app.utils.BluetoothAudioHelper
+import kaf.audiobookshelfwearos.app.utils.BluetoothHeadsetPromptDialog
 import kotlinx.coroutines.delay
 import timber.log.Timber
 import kotlin.math.roundToInt
@@ -68,6 +70,34 @@ class PlayerActivity : ComponentActivity() {
     private var playerService: PlayerService? = null
     private var isBound = false
     private var isNavigatingBack = false
+    private var showBluetoothPrompt by mutableStateOf(false)
+    private var waitingForBluetoothConnection = false
+
+    private fun executeTogglePlayPause() {
+        val bookId = resolveBookId()
+        val svc = playerService
+        if (isBound && svc != null) {
+            svc.togglePlayPause(bookId)
+        } else {
+            val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
+                action = "ACTION_PLAY_PAUSE"
+                if (bookId.isNotEmpty()) putExtra("id", bookId)
+            }
+            startService(intent)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (waitingForBluetoothConnection) {
+            waitingForBluetoothConnection = false
+            if (BluetoothAudioHelper.isBluetoothHeadsetConnected(this) &&
+                playerService?.isPlaying() != true
+            ) {
+                executeTogglePlayPause()
+            }
+        }
+    }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -259,18 +289,14 @@ class PlayerActivity : ComponentActivity() {
                             strokeWidth = 3.dp
                         )
                         IconButton(modifier = Modifier.fillMaxSize(), onClick = {
-                            val bookId = resolveBookId()
-                            val svc = playerService
-                            if (isBound && svc != null) {
-                                svc.togglePlayPause(bookId)
+                            if (!isPlaying && !isBuffering &&
+                                !BluetoothAudioHelper.isBluetoothHeadsetConnected(this@PlayerActivity)
+                            ) {
+                                showBluetoothPrompt = true
                             } else {
-                                val intent = Intent(this@PlayerActivity, PlayerService::class.java).apply {
-                                    action = "ACTION_PLAY_PAUSE"
-                                    if (bookId.isNotEmpty()) putExtra("id", bookId)
-                                }
-                                startService(intent)
+                                executeTogglePlayPause()
+                                isPlaying = !isPlaying
                             }
-                            isPlaying = !isPlaying
                         }) {
                             Icon(
                                 modifier = Modifier
@@ -318,6 +344,22 @@ class PlayerActivity : ComponentActivity() {
             ) {
                 BottomLayout(currentPosition, duration)
             }
+        }
+
+        if (!isPreview) {
+            BluetoothHeadsetPromptDialog(
+                visible = showBluetoothPrompt,
+                onYesConnect = {
+                    showBluetoothPrompt = false
+                    waitingForBluetoothConnection = true
+                    BluetoothAudioHelper.openBluetoothSettings(this@PlayerActivity)
+                },
+                onNoDismiss = {
+                    showBluetoothPrompt = false
+                    executeTogglePlayPause()
+                    isPlaying = true
+                }
+            )
         }
 
         if (!isPreview) DisposableEffect(Unit) {

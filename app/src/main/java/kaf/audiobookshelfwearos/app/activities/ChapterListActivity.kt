@@ -57,6 +57,8 @@ import androidx.compose.ui.unit.sp
 import kaf.audiobookshelfwearos.app.data.AudiobookDownloadProgress
 import kaf.audiobookshelfwearos.app.data.DownloadProgress
 import kaf.audiobookshelfwearos.app.utils.AudiobookProgressCalculator
+import kaf.audiobookshelfwearos.app.utils.BluetoothAudioHelper
+import kaf.audiobookshelfwearos.app.utils.BluetoothHeadsetPromptDialog
 import kaf.audiobookshelfwearos.app.utils.DownloadProgressCalculator
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.common.C
@@ -101,6 +103,16 @@ class ChapterListActivity : ComponentActivity() {
 
     private var isOnlineMode: Boolean = true
     private var isNavigatingBack: Boolean = false
+
+    private data class PendingPlaybackRequest(
+        val item: LibraryItem,
+        val time: Double,
+        val action: String
+    )
+
+    private var showBluetoothPrompt by mutableStateOf(false)
+    private var pendingPlayback: PendingPlaybackRequest? = null
+    private var waitingForBluetoothConnection: Boolean = false
 
     override fun finish() {
         if (isTaskRoot && !isNavigatingBack) {
@@ -182,6 +194,28 @@ class ChapterListActivity : ComponentActivity() {
                         }
                     }
                 }
+
+            BluetoothHeadsetPromptDialog(
+                visible = showBluetoothPrompt,
+                onYesConnect = {
+                    showBluetoothPrompt = false
+                    waitingForBluetoothConnection = true
+                    BluetoothAudioHelper.openBluetoothSettings(this@ChapterListActivity)
+                },
+                onNoDismiss = {
+                    showBluetoothPrompt = false
+                    val pending = pendingPlayback
+                    pendingPlayback = null
+                    if (pending != null) {
+                        startPlaybackAndOpenPlayer(
+                            pending.item,
+                            time = pending.time,
+                            action = pending.action,
+                            bypassBluetoothCheck = true
+                        )
+                    }
+                }
+            )
         }
     }
 
@@ -441,6 +475,19 @@ class ChapterListActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.getItem(this@ChapterListActivity, itemId)
+        if (waitingForBluetoothConnection) {
+            waitingForBluetoothConnection = false
+            val pending = pendingPlayback
+            pendingPlayback = null
+            if (pending != null && BluetoothAudioHelper.isBluetoothHeadsetConnected(this)) {
+                startPlaybackAndOpenPlayer(
+                    pending.item,
+                    time = pending.time,
+                    action = pending.action,
+                    bypassBluetoothCheck = true
+                )
+            }
+        }
     }
 
     @Composable
@@ -478,8 +525,14 @@ class ChapterListActivity : ComponentActivity() {
     private fun startPlaybackAndOpenPlayer(
         item: LibraryItem,
         time: Double = -1.0,
-        action: String = "default"
+        action: String = "default",
+        bypassBluetoothCheck: Boolean = false
     ) {
+        if (!bypassBluetoothCheck && !BluetoothAudioHelper.isBluetoothHeadsetConnected(this)) {
+            pendingPlayback = PendingPlaybackRequest(item, time, action)
+            showBluetoothPrompt = true
+            return
+        }
         UserDataManager(this).lastPlayedItemId = item.id
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {

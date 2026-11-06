@@ -35,7 +35,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -71,6 +73,8 @@ import kaf.audiobookshelfwearos.app.ApiHandler
 import kaf.audiobookshelfwearos.app.data.Library
 import kaf.audiobookshelfwearos.app.data.LibraryItem
 import kaf.audiobookshelfwearos.app.userdata.UserDataManager
+import kaf.audiobookshelfwearos.app.utils.BluetoothAudioHelper
+import kaf.audiobookshelfwearos.app.utils.BluetoothHeadsetPromptDialog
 import kaf.audiobookshelfwearos.app.viewmodels.ApiViewModel
 import okhttp3.OkHttpClient
 import timber.log.Timber
@@ -153,6 +157,14 @@ class BookListActivity : ComponentActivity() {
             }
             
             val displayLibraries = if (isSearchActive) filteredLibraries else libraries
+            var showBluetoothPrompt by remember {
+                val shouldPrompt = !BluetoothAudioHelper.hasPromptedOnStartup &&
+                    !BluetoothAudioHelper.isBluetoothHeadsetConnected(this@BookListActivity)
+                if (shouldPrompt) {
+                    BluetoothAudioHelper.hasPromptedOnStartup = true
+                }
+                mutableStateOf(shouldPrompt)
+            }
 
             Libraries(
                 displayLibraries,
@@ -165,6 +177,17 @@ class BookListActivity : ComponentActivity() {
                         launchRemoteSearchInput(launcher, remoteInputs)
                     }
                     viewModel.toggleSearch()
+                }
+            )
+
+            BluetoothHeadsetPromptDialog(
+                visible = showBluetoothPrompt,
+                onYesConnect = {
+                    showBluetoothPrompt = false
+                    BluetoothAudioHelper.openBluetoothSettings(this@BookListActivity)
+                },
+                onNoDismiss = {
+                    showBluetoothPrompt = false
                 }
             )
 
